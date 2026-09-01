@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>شبیه‌ساز مفهومی Clock Drift</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div class="container">
+
+        <div class="oscilloscope-wrapper" id="scopeWrapper">
+            <div class="scope-hint">محل نمونه‌برداری (خط‌چین قرمز) را بگیرید و بکشید</div>
+            <div id="canvas-div"></div>
+        </div>
+
+        <div class="toolbar">
+            <div class="controls">
+                <button id="btnPrev" title="بازگشت زمان">⏪</button>
+                <button id="btnPlayPause" title="توقف/پخش">▶️</button>
+                <button id="btnNext" title="جلو بردن زمان">⏩</button>
+                <button id="btnReset" title="شروع مجدد">🔄 پاک‌کردن</button>
+            </div>
+        </div>
+
+        <div class="network-layout" id="networkLayout">
+            <!-- فرستنده (چپ/بالا) -->
+            <div class="computer-wrapper">
+                <div class="monitor-frame">
+                    <div class="comp-label tx-label">💻 فرستنده (TX)</div>
+                    <div class="stopwatch tx-watch">
+                        <div class="watch-button"></div>
+                        <div class="watch-tick"></div>
+                        <div class="watch-center"></div>
+                        <div class="watch-hand" id="txHand"></div>
+                    </div>
+                    <div class="monitor-screen">
+                        <div class="config-row">
+                            <input type="text" id="textInput" placeholder="متن (Hi)" value="Hi" maxlength="8">
+                            <input type="number" id="txRate" step="0.1" min="0.2" max="3.0" value="1.0"
+                                title="سرعت ارسال">
+                            <span>ثانیه/بیت</span>
+                        </div>
+                        <button class="btn-send" id="btnSend">تایید و ارسال روی سیم</button>
+                        <div class="binary-display" id="sentBinary"><span
+                                style="color:#555; font-size:0.8rem; direction:rtl; display:block;">منتظر
+                                ارسال...</span></div>
+                    </div>
+                </div>
+                <div class="monitor-stand"></div>
+                <div class="monitor-base"></div>
+            </div>
+
+            <!-- کابل فیزیکی وسط -->
+            <div class="physical-wire-container">
+                <div class="wire-label">DATA Cable</div>
+                <div class="wire-line">
+                    <div class="wire-pulse"></div>
+                </div>
+            </div>
+
+            <!-- گیرنده (راست/پایین) -->
+            <div class="computer-wrapper">
+                <div class="monitor-frame">
+                    <div class="comp-label rx-label">🖥️ گیرنده (RX)</div>
+                    <div class="stopwatch rx-watch" id="rxWatchBody">
+                        <div class="watch-button"></div>
+                        <div class="watch-tick"></div>
+                        <div class="watch-center"></div>
+                        <div class="watch-hand" id="rxHand"></div>
+                    </div>
+                    <div class="monitor-screen">
+                        <div class="config-row">
+                            <span style="color:var(--success); font-weight:bold;">نرخ نمونه‌برداری:</span>
+                            <input type="number" id="rxRate" step="0.1" min="0.2" max="3.0" value="1.0"
+                                title="سرعت دریافت">
+                            <span>ثانیه/بیت</span>
+                        </div>
+                        <hr style="border-color: #222; width: 100%; margin: 3px 0;">
+                        <div class="binary-display" id="receivedBinary"></div>
+                        <div class="final-text" id="receivedText">-</div>
+                    </div>
+                </div>
+                <div class="monitor-stand"></div>
+                <div class="monitor-base"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let binaryData = "";
+        let isPlaying = false;
+        let hasStarted = false;
+
+        let globalTime = 0;
+        const FPS = 60;
+
+        let isMobile = false;
+        let speed = 2.0; // بر اساس دستگاه تنظیم می‌شود
+
+        let txPeriod = 1.0;
+        let rxPeriod = 1.0;
+
+        let canvasW, canvasH;
+        let txX = 50;
+        let defaultRxX = 0;
+
+        let sampleLineX = 0;
+        let isDraggingOffset = false;
+
+        const byteColors = ['#00ffcc', '#ff3366', '#ffcc00', '#cc33ff', '#3399ff', '#ff6633', '#00ff44', '#ff33cc'];
+        let ripples = [];
+        let rxSampleCount = 0;
+        let rxHtmlMemory = "";
+
+        function checkMobile() {
+            isMobile = window.innerWidth <= 768;
+            speed = isMobile ? 1.0 : 2.0; // کاهش چشمگیر سرعت حرکت روی موبایل برای درک بهتر
+            txX = isMobile ? 30 : 60;
+        }
+
+        function stringToBinary(str) {
+            let bin = "";
+            for (let i = 0; i < str.length; i++) {
+                bin += str.charCodeAt(i).toString(2).padStart(8, '0');
+            }
+            return bin;
+        }
+
+        function renderTxBinary(binStr, activeIndex) {
+            if (!binStr) return "";
+            let html = "";
+            let bytes = binStr.match(/.{1,8}/g) || [];
+            let globalBitIdx = 0;
+            bytes.forEach((byteStr, i) => {
+                let color = byteColors[i % byteColors.length];
+                html += `<span class="byte-block" style="color:${color}">`;
+                for (let b = 0; b < 8; b++) {
+                    if (globalBitIdx === activeIndex) html += `<span class="active-tx-bit">${byteStr[b]}</span>`;
+                    else html += byteStr[b];
+                    globalBitIdx++;
+                }
+                html += `</span>`;
+            });
+            return html;
+        }
+
+        function updateRxBinaryUI(newBit, isError) {
+            let colorClass = isError ? 'new-rx-error' : 'new-rx-correct';
+            rxHtmlMemory = rxHtmlMemory.replace(/new-rx-correct|new-rx-error/g, '');
+
+            let byteIndex = Math.floor(rxSampleCount / 8);
+            let charColor = byteColors[byteIndex % byteColors.length];
+
+            if (rxSampleCount % 8 === 0 && rxSampleCount > 0) rxHtmlMemory += `</span> <span class="byte-block" style="color:${charColor}">`;
+            else if (rxSampleCount === 0) rxHtmlMemory += `<span class="byte-block" style="color:${charColor}">`;
+
+            rxHtmlMemory += `<span class="${colorClass}">${newBit}</span>`;
+            document.getElementById('receivedBinary').innerHTML = rxHtmlMemory + "</span>";
+        }
+
+        document.getElementById('textInput').addEventListener('input', function (e) { this.value = this.value.replace(/[^\x00-\x7F]/g, ''); });
+
+        document.getElementById('btnSend').addEventListener('click', startTransmission);
+        document.getElementById('btnPlayPause').addEventListener('click', () => {
+            if (hasStarted) {
+                isPlaying = !isPlaying;
+                document.getElementById('btnPlayPause').innerText = isPlaying ? "⏸️" : "▶️";
+                if (isPlaying) document.getElementById('networkLayout').classList.add('playing');
+                else document.getElementById('networkLayout').classList.remove('playing');
+            }
+        });
+        document.getElementById('btnNext').addEventListener('click', () => {
+            if (hasStarted) { isPlaying = false; document.getElementById('btnPlayPause').innerText = "▶️"; document.getElementById('networkLayout').classList.remove('playing'); globalTime += (txPeriod * FPS / 4); }
+        });
+        document.getElementById('btnPrev').addEventListener('click', () => {
+            if (hasStarted) { isPlaying = false; document.getElementById('btnPlayPause').innerText = "▶️"; document.getElementById('networkLayout').classList.remove('playing'); globalTime = Math.max(0, globalTime - (txPeriod * FPS / 4)); }
+        });
+        document.getElementById('btnReset').addEventListener('click', () => {
+            isPlaying = false; hasStarted = false; globalTime = 0; ripples = []; rxSampleCount = 0; rxHtmlMemory = "";
+            document.getElementById('btnPlayPause').innerText = "▶️";
+            document.getElementById('networkLayout').classList.remove('playing');
+            document.getElementById('sentBinary').innerHTML = '<span style="color:#555; font-size:0.8rem; direction:rtl; display:block;">منتظر ارسال...</span>';
+            document.getElementById('receivedBinary').innerHTML = "";
+            document.getElementById('receivedText').innerText = "-";
+            document.getElementById('txHand').style.transform = `rotate(0deg)`;
+            document.getElementById('rxHand').style.transform = `rotate(0deg)`;
+            if (canvasW) sampleLineX = defaultRxX - (isMobile ? 20 : 30);
+        });
+
+        function startTransmission() {
+            let txt = document.getElementById('textInput').value || "A";
+            binaryData = stringToBinary(txt);
+            txPeriod = parseFloat(document.getElementById('txRate').value) || 1.0;
+            rxPeriod = parseFloat(document.getElementById('rxRate').value) || 1.0;
+
+            globalTime = 0; hasStarted = true; isPlaying = true; ripples = []; rxSampleCount = 0; rxHtmlMemory = "";
+            document.getElementById('btnPlayPause').innerText = "⏸️";
+            document.getElementById('networkLayout').classList.add('playing');
+            document.getElementById('receivedBinary').innerHTML = "";
+            document.getElementById('receivedText').innerText = "-";
+        }
+
+        // ==========================================
+        // P5.js Engine
+        // ==========================================
+        function setup() {
+            checkMobile();
+            let container = document.getElementById('canvas-div');
+            canvasW = container.offsetWidth; canvasH = container.offsetHeight;
+            let cvs = createCanvas(canvasW, canvasH);
+            cvs.parent('canvas-div');
+            textFont('Vazirmatn');
+
+            defaultRxX = canvasW - (isMobile ? 30 : 50);
+            sampleLineX = defaultRxX - (isMobile ? 20 : 30);
+
+            cvs.mousePressed(startDragOffset);
+            cvs.mouseReleased(stopDragOffset);
+            cvs.touchStarted(startDragOffset);
+            cvs.touchEnded(stopDragOffset);
+        }
+
+        function windowResized() {
+            checkMobile();
+            let container = document.getElementById('canvas-div');
+            canvasW = container.offsetWidth; canvasH = container.offsetHeight;
+            resizeCanvas(canvasW, canvasH);
+            defaultRxX = canvasW - (isMobile ? 30 : 50);
+            if (sampleLineX > defaultRxX) sampleLineX = defaultRxX - (isMobile ? 20 : 30);
+        }
+
+        function draw() {
+            background(3, 10, 15);
+            drawScopeGrid();
+            drawPorts();
+
+            let tolerance = isMobile ? 40 : 30; // تلرانس بیشتر برای لمس با انگشت روی گوشی
+            if (isDraggingOffset && hasStarted) {
+                // آپدیت کردن بر اساس موس یا تاچ
+                let pointerX = (touches.length > 0) ? touches[0].x : mouseX;
+                sampleLineX = constrain(pointerX, txX + 50, defaultRxX + 10);
+            }
+
+            if (!hasStarted) {
+                fill(100); noStroke(); textAlign(CENTER, CENTER); textSize(isMobile ? 11 : 14); textStyle(BOLD);
+                text("تنظیمات را اعمال و پیام را ارسال کنید.", width / 2, height / 2);
+                textStyle(NORMAL);
+                return;
+            }
+
+            if (isPlaying && !isDraggingOffset) globalTime += 1;
+
+            updateTxUI();
+            drawSignals();
+            processReceiver();
+            drawRipples();
+            updateVisualClocks();
+        }
+
+        function startDragOffset(event) {
+            if (!hasStarted) return;
+            let pointerX = (touches.length > 0) ? touches[0].x : mouseX;
+            let tolerance = isMobile ? 40 : 30;
+            if (abs(pointerX - sampleLineX) < tolerance) {
+                isDraggingOffset = true;
+                isPlaying = false;
+                document.getElementById('btnPlayPause').innerText = "▶️";
+                document.getElementById('networkLayout').classList.remove('playing');
+                // جلوگیری از اسکرول شدن صفحه موقع درگ کردن روی موبایل
+                if (event.type === 'touchstart') event.preventDefault();
+            }
+        }
+        function stopDragOffset() { isDraggingOffset = false; }
+
+        function drawScopeGrid() {
+            stroke(19, 36, 32); strokeWeight(1);
+            let gridSize = isMobile ? 25 : 35;
+            for (let x = 0; x < width; x += gridSize) line(x, 0, x, height);
+            for (let y = 0; y < height; y += gridSize) line(0, y, width, y);
+
+            let dataTop = canvasH * 0.25;
+            let dataBot = canvasH * 0.75;
+
+            stroke(255, 255, 255, 40); drawingContext.setLineDash([2, 4]);
+            line(0, dataTop, width, dataTop); line(0, dataBot, width, dataBot);
+            drawingContext.setLineDash([]);
+
+            let bgW = isMobile ? 45 : 65;
+            let bgH = isMobile ? 20 : 30;
+            fill(0, 0, 0, 220); noStroke();
+            rect(5, dataTop - bgH / 2, bgW, bgH, 4);
+            rect(5, dataBot - bgH / 2, bgW, bgH, 4);
+
+            fill('#66fcf1'); textAlign(CENTER, CENTER); textSize(isMobile ? 11 : 14); textStyle(BOLD);
+            text("5V", 5 + bgW / 2, dataTop);
+            text("0V", 5 + bgW / 2, dataBot);
+            textStyle(NORMAL);
+        }
+
+        function drawPorts() {
+            let dataMid = canvasH * 0.5;
+            let portW = isMobile ? 8 : 10;
+            let jackH = isMobile ? 18 : 24;
+
+            strokeWeight(isMobile ? 3 : 5); stroke('#4e8cff'); line(0, dataMid, txX, dataMid);
+            stroke('#00ff88'); line(defaultRxX, dataMid, canvasW, dataMid);
+
+            noStroke(); fill('#2b3744'); rect(txX - portW, 0, portW, height); rect(defaultRxX, 0, portW, height);
+            fill('#4e8cff'); rect(txX - portW, dataMid - jackH / 2, portW, jackH, 3);
+            fill('#00ff88'); rect(defaultRxX, dataMid - jackH / 2, portW, jackH, 3);
+        }
+
+        function getVoltageAtPixel(x) {
+            if (x < txX) return { v: null, index: -1 };
+            let dist = x - txX;
+            let timeGenerated = globalTime - (dist / speed);
+            let v0 = canvasH * 0.75;
+            let v5 = canvasH * 0.25;
+
+            let txBitDuration = txPeriod * FPS;
+
+            if (timeGenerated < 0 || timeGenerated >= binaryData.length * txBitDuration) {
+                return { v: v0, index: -1 };
+            }
+
+            let bitIndex = Math.floor(timeGenerated / txBitDuration);
+            let bitVal = parseInt(binaryData[bitIndex]);
+            return { v: (bitVal === 1 ? v5 : v0), index: bitIndex };
+        }
+
+        function drawSignals() {
+            noFill(); strokeWeight(isMobile ? 3 : 5);
+            let prevIndex = -2;
+            let prevV = null;
+            let currentPath = [];
+
+            for (let x = txX; x <= defaultRxX; x += 1) {
+                let p = getVoltageAtPixel(x);
+                if (p.index !== prevIndex || x === defaultRxX) {
+                    if (currentPath.length > 0) {
+                        let byteIndex = Math.floor(prevIndex / 8);
+                        let col = (prevIndex === -1) ? '#555555' : byteColors[byteIndex % byteColors.length];
+                        stroke(col);
+                        beginShape();
+                        for (let pt of currentPath) vertex(pt.x, pt.y);
+                        endShape();
+                    }
+                    currentPath = [];
+                    if (prevV !== null && p.v !== prevV && x !== defaultRxX) currentPath.push({ x: x, y: prevV });
+                }
+                currentPath.push({ x: x, y: p.v });
+                prevIndex = p.index; prevV = p.v;
+            }
+            drawBitGrid();
+        }
+
+
+        function drawBitGrid() {
+            let txBitDuration = txPeriod * FPS;
+            for (let i = 0; i <= binaryData.length; i++) {
+                let timeGenerated = i * txBitDuration;
+                let x = txX + ((globalTime - timeGenerated) * speed);
+
+                if (x > txX && x < defaultRxX) {
+                    stroke(255, 255, 255, 30); strokeWeight(1); drawingContext.setLineDash([4, 4]);
+                    line(x, canvasH * 0.15, x, canvasH * 0.85);
+                    drawingContext.setLineDash([]);
+
+                    if (i < binaryData.length) {
+                        let nextX = txX + ((globalTime - (i + 1) * txBitDuration) * speed);
+                        let midX = (x + nextX) / 2;
+                        if (midX > txX && midX < defaultRxX) {
+                            let byteIndex = Math.floor(i / 8);
+                            fill(byteColors[byteIndex % byteColors.length]);
+                            noStroke(); textSize(isMobile ? 12 : 16); textAlign(CENTER, BOTTOM); textStyle(BOLD);
+                            text(binaryData[i], midX, (canvasH * 0.25) - (isMobile ? 6 : 10));
+                            textStyle(NORMAL);
+                        }
+                    }
+                }
+            }
+        }
+
+        function updateTxUI() {
+            let p = getVoltageAtPixel(txX + 1);
+            document.getElementById('sentBinary').innerHTML = renderTxBinary(binaryData, p.index);
+        }
+
+        function processReceiver() {
+            let txBitDuration = txPeriod * FPS;
+            let rxBitDuration = rxPeriod * FPS;
+            let t_arrival = (sampleLineX - txX) / speed;
+            let t_end = t_arrival + (binaryData.length * txBitDuration);
+            let justSampledNow = false;
+
+            if (isDraggingOffset) { stroke('#ffb703'); fill('#ffb703'); }
+            else { stroke('#ff4757'); fill('#ff4757'); }
+
+            strokeWeight(isMobile ? 2 : 3); drawingContext.setLineDash([6, 4]);
+            line(sampleLineX, 0, sampleLineX, height);
+            drawingContext.setLineDash([]);
+
+            let handleW = isMobile ? 24 : 36;
+            let handleH = isMobile ? 16 : 20;
+            noStroke();
+            triangle(sampleLineX - 8, 10, sampleLineX + 8, 10, sampleLineX, 26);
+            rect(sampleLineX - handleW / 2, height - handleH, handleW, handleH, 4);
+            fill(0); textSize(isMobile ? 10 : 12); textAlign(CENTER, CENTER); textStyle(BOLD);
+            text("< >", sampleLineX, height - handleH / 2); textStyle(NORMAL);
+
+            let nextSampleTime = t_arrival + (0.5 * rxBitDuration) + (rxSampleCount * rxBitDuration);
+
+            if (globalTime >= nextSampleTime && nextSampleTime <= t_end) {
+
+                let genTimeAtSample = nextSampleTime - t_arrival;
+                let targetBitIndex = Math.floor(genTimeAtSample / txBitDuration);
+
+                let sampled = "0";
+                if (targetBitIndex >= 0 && targetBitIndex < binaryData.length) {
+                    sampled = binaryData[targetBitIndex];
+                }
+
+                let expectedBit = (rxSampleCount < binaryData.length) ? binaryData[rxSampleCount] : null;
+                let isError = (sampled !== expectedBit);
+
+                updateRxBinaryUI(sampled, isError);
+
+                let sampleY = parseInt(sampled) === 1 ? (canvasH * 0.25) : (canvasH * 0.75);
+                ripples.push({ x: sampleLineX, y: sampleY, radius: isMobile ? 3 : 5, alpha: 255, val: sampled, isError: isError });
+
+                let rxWatch = document.getElementById('rxWatchBody');
+                rxWatch.style.boxShadow = isError ? "0 0 20px #ff4757" : "0 0 20px #00ff88";
+                setTimeout(() => rxWatch.style.boxShadow = "0 5px 10px rgba(0,0,0,0.8), inset 0 0 10px rgba(0,0,0,1)", 200);
+
+                rxSampleCount++;
+                justSampledNow = true;
+            }
+
+            if (justSampledNow || globalTime % 10 === 0) {
+                let tempDiv = document.createElement('div');
+                tempDiv.innerHTML = rxHtmlMemory;
+                let rawBits = tempDiv.innerText.replace(/\s/g, '');
+
+                let textOut = "";
+                for (let i = 0; i < rawBits.length; i += 8) {
+                    let byte = rawBits.substring(i, i + 8);
+                    if (byte.length === 8) textOut += String.fromCharCode(parseInt(byte, 2));
+                }
+                document.getElementById('receivedText').innerText = textOut || "-";
+            }
+        }
+
+        function updateVisualClocks() {
+            let txBitDuration = txPeriod * FPS;
+            let rxBitDuration = rxPeriod * FPS;
+
+            let txAngle = ((globalTime / txBitDuration) * 360) % 360;
+            document.getElementById('txHand').style.transform = `rotate(${txAngle}deg)`;
+
+            let t_arrival = (sampleLineX - txX) / speed;
+            let rxPhase = ((globalTime - t_arrival) / rxBitDuration) - 0.5;
+            let rxAngle = ((rxPhase * 360) % 360 + 360) % 360;
+
+            if (globalTime < t_arrival) rxAngle = 0;
+            document.getElementById('rxHand').style.transform = `rotate(${rxAngle}deg)`;
+        }
+
+        function drawRipples() {
+            for (let i = ripples.length - 1; i >= 0; i--) {
+                let r = ripples[i];
+                let col = r.isError ? color(255, 71, 87, r.alpha) : color(0, 255, 136, r.alpha);
+
+                noFill(); stroke(col); strokeWeight(isMobile ? 2 : 3);
+                circle(r.x, r.y, r.radius);
+
+                fill(col); noStroke(); textSize(isMobile ? 18 : 24); textAlign(CENTER, CENTER); textStyle(BOLD);
+                let icon = r.isError ? "❌" : "✔️";
+                text(r.val + " " + icon, r.x - (isMobile ? 22 : 30), r.y - (isMobile ? 20 : 25));
+                textStyle(NORMAL);
+
+                r.radius += isMobile ? 1.5 : 2.5;
+                r.alpha -= 12;
+                if (r.alpha <= 0) ripples.splice(i, 1);
+            }
+        }
+    </script>
+</body>
+
+</html>
